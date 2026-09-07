@@ -42,3 +42,6 @@ rhdh-local-setup/
 
 # Temporary testing checkouts
 tmp/
+
+# Generated dashboard output
+output/

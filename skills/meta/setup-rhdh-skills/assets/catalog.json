@@ -313,6 +313,13 @@
       "requiresExternalSkills": []
     },
     {
+      "name": "rhdh-release-dashboard",
+      "category": "release",
+      "invocation": "model",
+      "requiresSkills": [],
+      "requiresExternalSkills": []
+    },
+    {
       "name": "rhdh-release-schedule",
       "category": "release",
       "invocation": "model",
