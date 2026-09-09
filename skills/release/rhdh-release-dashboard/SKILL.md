@@ -43,6 +43,8 @@ Opens automatically in the default browser (unless `--no-browser` is used).
 ## Dashboard features
 
 - **Hierarchical tree**: Feature → Epic → Story/Task with expand/collapse
+- **Contributed work**: When `--team` is used, shows team-owned epics under
+  other teams' features (discovered via parent relationship on the feature)
 - **Progress bars**: Completion percentage at Feature and Epic levels
 - **Status indicators**: Color-coded by Jira status (Done/In Progress/To Do/Blocked)
 - **Bugs section**: Grouped by status with collapsible sections

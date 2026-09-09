@@ -101,6 +101,7 @@ Open in any browser — self-contained HTML, no server needed.
 ### Team Dashboard
 
 - **Features** — Full hierarchy: Feature → Epic → Story/Task with completion %
+- **Contributed Work** — When using `--team`, epics owned by your team under another team's features (found by parent relationship, not fixVersion/label on the epic)
 - **Independent Epics** — Epics not under any Feature
 - **Bugs** — Grouped by status (collapsible)
 - **Backports** — Bugs per backport version with progress bars

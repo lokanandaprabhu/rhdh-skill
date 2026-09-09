@@ -176,6 +176,26 @@ class TestGenerateDemoData:
         assert 0 <= feature["completion"] <= 100
 
 
+class TestFilterContributedEpics:
+    """Test contributed epic detection for cross-team work."""
+
+    def test_finds_ui_epics_under_other_teams_features(self):
+        children = [
+            {"key": "RHIDP-14151", "type": "Epic", "team_id": "ui-team", "parent": "RHDHPLAN-1139"},
+            {"key": "RHIDP-99999", "type": "Epic", "team_id": "ui-team", "parent": "RHDHPLAN-1000"},
+            {"key": "RHIDP-88888", "type": "Story", "team_id": "ui-team", "parent": "RHDHPLAN-1139"},
+            {"key": "RHIDP-77777", "type": "Epic", "team_id": "ai-team", "parent": "RHDHPLAN-1139"},
+        ]
+        result = dashboard.filter_contributed_epics(children, "ui-team", {"RHDHPLAN-1139"})
+        assert len(result) == 1
+        assert result[0]["key"] == "RHIDP-14151"
+
+    def test_empty_when_no_matching_parents(self):
+        children = [{"key": "E1", "type": "Epic", "team_id": "ui-team", "parent": "F1"}]
+        result = dashboard.filter_contributed_epics(children, "ui-team", {"F2"})
+        assert result == []
+
+
 class TestGenerateHtml:
     """Test HTML generation."""
 
@@ -254,3 +274,62 @@ class TestGenerateHtml:
         assert "<style>" in html
         assert "tree-node" in html
         assert "progress-bar" in html
+
+    def test_renders_contributed_work_section(self):
+        """Should render contributed work when team epics sit under other teams' features."""
+        data = {
+            "features": [],
+            "contributed_features": [
+                {
+                    "key": "RHDHPLAN-100",
+                    "summary": "Other Team Feature",
+                    "status": "In Progress",
+                    "type": "Feature",
+                    "assignee": "Alice",
+                    "team_name": "RHDH Install",
+                    "completion": 25,
+                    "epics": [
+                        {
+                            "key": "RHIDP-200",
+                            "summary": "UI Epic",
+                            "status": "In Progress",
+                            "type": "Epic",
+                            "assignee": "Bob",
+                            "completion": 50,
+                            "issues": [
+                                {
+                                    "key": "RHIDP-201",
+                                    "summary": "UI Story",
+                                    "status": "Done",
+                                    "type": "Story",
+                                    "assignee": "Carol",
+                                    "prs": [],
+                                }
+                            ],
+                            "prs": [],
+                        }
+                    ],
+                    "prs": [],
+                }
+            ],
+            "stats": {
+                "features": 0,
+                "contributed_features": 1,
+                "contributed_epics": 1,
+                "contributed_issues": 1,
+                "epics": 1,
+                "issues": 1,
+                "prs": 0,
+            },
+            "team_name": "RHDH Frontend Plugins & UI",
+        }
+        html = dashboard.generate_html(data, "rhdh-2.1-candidate", "2.1")
+
+        assert "Contributed Work" in html
+        assert "RHDH Install" in html
+        assert "RHDHPLAN-100" in html
+        assert "RHIDP-200" in html
+        assert "RHIDP-201" in html
+        assert "1 items" in html
+        assert "50%" in html
+        assert "1 child items" in html

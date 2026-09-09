@@ -358,6 +358,129 @@ def query_jira_by_parent_keys(parent_keys: list[str], batch_size: int = 20) -> l
     return all_issues
 
 
+def query_jira_by_keys(issue_keys: list[str], batch_size: int = 50) -> list[dict[str, Any]]:
+    """Query JIRA issues by key in batches."""
+    if not issue_keys:
+        return []
+
+    token = os.environ.get("JIRA_API_TOKEN")
+    email = os.environ.get("JIRA_EMAIL")
+
+    if not token:
+        raise RuntimeError("JIRA_API_TOKEN environment variable not set")
+    if not email:
+        raise RuntimeError("JIRA_EMAIL environment variable not set (your Red Hat email)")
+
+    all_issues = []
+
+    for i in range(0, len(issue_keys), batch_size):
+        batch = issue_keys[i:i + batch_size]
+        key_list = ",".join(batch)
+        jql = f'key IN ({key_list})'
+
+        next_page_token = None
+
+        while True:
+            params = {
+                "jql": jql,
+                "maxResults": 100,
+                "fields": "key,issuetype,status,summary,assignee,parent,customfield_10875,customfield_10001,priority"
+            }
+            if next_page_token:
+                params["nextPageToken"] = next_page_token
+
+            url = f"{JIRA_API_BASE}/search/jql?{urllib.parse.urlencode(params)}"
+            req = urllib.request.Request(url, method="GET")
+            credentials = f"{email}:{token}"
+            encoded_credentials = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
+            req.add_header("Authorization", f"Basic {encoded_credentials}")
+
+            try:
+                with urllib.request.urlopen(req, timeout=60) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+
+                for issue in data.get("issues", []):
+                    fields = issue.get("fields", {})
+                    team_field = fields.get("customfield_10001", {})
+                    team_name = team_field.get("name", "") if isinstance(team_field, dict) else ""
+                    team_id = team_field.get("id", "") if isinstance(team_field, dict) else ""
+
+                    all_issues.append({
+                        "key": issue.get("key", ""),
+                        "type": fields.get("issuetype", {}).get("name", ""),
+                        "status": fields.get("status", {}).get("name", ""),
+                        "summary": fields.get("summary", ""),
+                        "assignee": fields.get("assignee", {}).get("displayName", "") if fields.get("assignee") else "",
+                        "parent": fields.get("parent", {}).get("key", "") if fields.get("parent") else "",
+                        "git_pr": fields.get("customfield_10875", ""),
+                        "team_name": team_name,
+                        "team_id": team_id,
+                        "priority": fields.get("priority", {}).get("name", "") if fields.get("priority") else "",
+                    })
+
+                next_page_token = data.get("nextPageToken")
+                if not next_page_token:
+                    break
+
+            except urllib.error.HTTPError as e:
+                error_msg = e.read().decode("utf-8") if e.fp else str(e)
+                raise RuntimeError(f"JIRA API request failed: {e.code} {e.reason}\n{error_msg}")
+            except urllib.error.URLError as e:
+                raise RuntimeError(f"JIRA API connection failed: {e.reason}")
+            except Exception as e:
+                raise RuntimeError(f"JIRA query failed: {e}")
+
+    return all_issues
+
+
+def query_release_features(
+    fix_version: str | None = None,
+    label: str | None = None,
+) -> list[dict[str, Any]]:
+    """Query all features in the release scope without a team filter."""
+    if fix_version and label:
+        jql = f'(labels = "{label}" OR fixVersion = "{fix_version}") AND type = "Feature"'
+        return query_jira_rest_api_raw(jql)
+    if fix_version:
+        return query_jira_by_fix_version(fix_version, "RHDHPLAN", issue_type="Feature", team=None)
+    if label:
+        return query_jira_rest_api(label, issue_type="Feature", team=None)
+    return []
+
+
+def filter_contributed_epics(
+    child_issues: list[dict[str, Any]],
+    team_id: str,
+    other_feature_keys: set[str],
+) -> list[dict[str, Any]]:
+    """Return team-owned epics that sit under another team's feature."""
+    return [
+        issue for issue in child_issues
+        if issue.get("type") == "Epic"
+        and issue.get("team_id") == team_id
+        and issue.get("parent") in other_feature_keys
+    ]
+
+
+def find_contributed_epics(
+    release_features: list[dict[str, Any]],
+    team_id: str,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Find team-owned epics under other teams' release features.
+
+    Epics are discovered by parent relationship, not by fixVersion/label on the epic.
+    Example: RHIDP-14151 (UI team) under RHDHPLAN-1139 (RHDH AI feature).
+    """
+    other_features = [f for f in release_features if f.get("team_id") != team_id]
+    parent_map = {f["key"]: f for f in other_features}
+    if not parent_map:
+        return [], {}
+
+    child_issues = query_jira_by_parent_keys(list(parent_map.keys()))
+    contributed_epics = filter_contributed_epics(child_issues, team_id, set(parent_map.keys()))
+    return contributed_epics, parent_map
+
+
 def query_jira_rest_api_raw(jql: str) -> list[dict[str, Any]]:
     """Query JIRA using raw JQL with token-based pagination (GET method for enhanced API mode)."""
     token = os.environ.get("JIRA_API_TOKEN")
@@ -874,6 +997,16 @@ def build_comprehensive_release_view(fix_version: str | None = None, label: str 
         features = query_jira_rest_api(label, issue_type="Feature", team=team)
         print(f"    - Found {len(features)} Features")
 
+    # Team-owned epics under another team's features (only when --team is used).
+    # Discovered via parent feature, not fixVersion/label on the epic itself.
+    cross_team_epics: list[dict[str, Any]] = []
+    contributed_parent_map: dict[str, dict[str, Any]] = {}
+    if team:
+        print("  Querying contributed epics (team epics under other teams' features)...")
+        release_features = query_release_features(fix_version, label)
+        cross_team_epics, contributed_parent_map = find_contributed_epics(release_features, team)
+        print(f"    - Found {len(cross_team_epics)} contributed epics on other teams' features")
+
     # Query ALL child Epics by parent relationship (no fixVersion/label filter, across all projects)
     print("  Querying child Epics...")
     child_epics = []
@@ -968,8 +1101,18 @@ def build_comprehensive_release_view(fix_version: str | None = None, label: str 
     total_backport_bugs = sum(len(bugs) for bugs in backports.values())
     print(f"Found {len(features)} Features, {len(epics)} Epics, {len(other_issues)} other items, {len(all_bugs)} bugs, {total_backport_bugs} backport bugs across {len(backports)} versions")
 
+    contributed_epic_keys = {e["key"] for e in cross_team_epics}
+    if cross_team_epics:
+        contributed_stories = query_jira_by_parent_keys(list(contributed_epic_keys))
+        existing_story_keys = {s["key"] for s in other_issues}
+        for story in contributed_stories:
+            if story["key"] not in existing_story_keys:
+                other_issues.append(story)
+                existing_story_keys.add(story["key"])
+
     # Build feature hierarchy
     feature_hierarchy = []
+    contributed_features: list[dict[str, Any]] = []
     total_prs = 0
     feature_keys = set()
     epic_keys = set()
@@ -1046,9 +1189,86 @@ def build_comprehensive_release_view(fix_version: str | None = None, label: str 
 
         feature_hierarchy.append(feature_node)
 
+    if cross_team_epics:
+        parent_map = contributed_parent_map
+        epics_by_parent: dict[str, list[dict[str, Any]]] = {}
+        for epic in cross_team_epics:
+            epics_by_parent.setdefault(epic["parent"], []).append(epic)
+
+        for parent_key in sorted(epics_by_parent.keys()):
+            parent_feature = parent_map.get(parent_key)
+            if not parent_feature:
+                continue
+
+            feature_node = {
+                "key": parent_feature["key"],
+                "summary": parent_feature["summary"],
+                "status": parent_feature["status"],
+                "type": "Feature",
+                "assignee": parent_feature.get("assignee", ""),
+                "team_name": parent_feature.get("team_name", ""),
+                "epics": [],
+                "prs": []
+            }
+
+            for epic in epics_by_parent[parent_key]:
+                epic_keys.add(epic["key"])
+                epic_node = {
+                    "key": epic["key"],
+                    "summary": epic["summary"],
+                    "status": epic["status"],
+                    "type": "Epic",
+                    "assignee": epic.get("assignee", ""),
+                    "issues": [],
+                    "prs": []
+                }
+
+                epic_issues = [i for i in other_issues if i.get("parent") == epic["key"]]
+                for issue in epic_issues:
+                    issue_node = {
+                        "key": issue["key"],
+                        "summary": issue["summary"],
+                        "status": issue["status"],
+                        "type": issue["type"],
+                        "assignee": issue.get("assignee", ""),
+                        "prs": []
+                    }
+
+                    if has_gh:
+                        pr_urls = get_issue_links(issue)
+                        for pr_url in pr_urls:
+                            pr_status = get_pr_status(pr_url)
+                            issue_node["prs"].append(pr_status)
+                            total_prs += 1
+
+                    epic_node["issues"].append(issue_node)
+
+                if epic_node["issues"]:
+                    done_count = sum(1 for i in epic_node["issues"] if is_status_done(i["status"]))
+                    epic_node["completion"] = int((done_count / len(epic_node["issues"])) * 100)
+                else:
+                    epic_node["completion"] = 100 if is_status_done(epic["status"]) else 0
+
+                feature_node["epics"].append(epic_node)
+
+            all_children = []
+            for epic in feature_node["epics"]:
+                all_children.append(epic)
+                all_children.extend(epic["issues"])
+
+            if all_children:
+                done_count = sum(1 for i in all_children if is_status_done(i["status"]))
+                feature_node["completion"] = int((done_count / len(all_children)) * 100)
+            else:
+                feature_node["completion"] = 100 if is_status_done(parent_feature["status"]) else 0
+
+            contributed_features.append(feature_node)
+
     # Find independent epics (not under any feature)
     independent_epics = []
     for epic in epics:
+        if epic["key"] in contributed_epic_keys:
+            continue
         parent = epic.get("parent", "")
         if not parent or parent not in feature_keys:
             epic_keys.add(epic["key"])
@@ -1177,8 +1397,17 @@ def build_comprehensive_release_view(fix_version: str | None = None, label: str 
             "total": len(bp_bugs),
         }
 
+    contributed_issues = sum(
+        len(epic["issues"]) for feature in contributed_features for epic in feature["epics"]
+    )
+
     print(f"  Built hierarchy:")
     print(f"    - {len(features)} Features")
+    if contributed_features:
+        print(
+            f"    - {len(contributed_features)} Contributed Features "
+            f"({len(contributed_epic_keys)} epics, {contributed_issues} child items on other teams' features)"
+        )
     print(f"    - {len(independent_epics)} Independent Epics")
     print(f"    - {len(independent_stories)} Independent Stories/Tasks")
     print(f"    - {len(all_bugs)} Bugs ({len(bugs_by_status)} status groups)")
@@ -1187,12 +1416,16 @@ def build_comprehensive_release_view(fix_version: str | None = None, label: str 
 
     return {
         "features": feature_hierarchy,
+        "contributed_features": contributed_features,
         "independent_epics": independent_epics,
         "independent_stories": independent_stories,
         "bugs_by_status": bugs_by_status,
         "backports": backport_data,
         "stats": {
             "features": len(features),
+            "contributed_features": len(contributed_features),
+            "contributed_epics": len(contributed_epic_keys),
+            "contributed_issues": contributed_issues,
             "epics": len(epics),
             "independent_epics": len(independent_epics),
             "independent_stories": len(independent_stories),
@@ -1771,11 +2004,125 @@ def generate_team_overview_html(data: dict[str, Any], label: str, version: str) 
     return html
 
 
+def render_feature_hierarchy_html(features: list[dict[str, Any]], show_owner_team: bool = False) -> str:
+    """Render Feature → Epic → Story hierarchy as HTML."""
+    html = '<ul class="tree">\n'
+
+    for feature in features:
+        completion = feature["completion"]
+        progress_class = "low" if completion < 33 else "medium" if completion < 67 else ""
+        status_class = get_status_class(feature["status"])
+        assignee = feature.get("assignee", "")
+        owner_team = feature.get("team_name", "")
+        owner_team_html = (
+            f'<span style="font-size:12px;color:#6f42c1;font-weight:600;">[{owner_team}]</span> '
+            if show_owner_team and owner_team else ""
+        )
+        feature_epic_count = len(feature.get("epics", []))
+        feature_epic_suffix = (
+            f' <span style="color:#6c757d;font-size:12px;">({feature_epic_count} epics)</span>'
+            if feature_epic_count else ""
+        )
+
+        html += f"""
+                <li class="tree-item">
+                    <div class="tree-node feature" onclick="toggleNode(event, this)">
+                        <div class="node-header">
+                            <span class="expand-icon">▶</span>
+                            <a href="{JIRA_BASE}/browse/{feature['key']}" class="issue-key" target="_blank" onclick="event.stopPropagation()">{feature['key']}</a>
+                            <span class="summary">{owner_team_html}{feature['summary']}{feature_epic_suffix}</span>
+                            <div class="progress-bar">
+                                <div class="progress-fill {progress_class}" style="width: {completion}%">{completion}%</div>
+                            </div>
+                            <span class="status-badge {status_class}">{feature['status']}</span>
+                            <span class="assignee">{assignee}</span>
+                        </div>
+                        <div class="children">
+                            <ul class="tree">
+"""
+
+        for epic in feature.get("epics", []):
+            epic_completion = epic["completion"]
+            epic_progress_class = "low" if epic_completion < 33 else "medium" if epic_completion < 67 else ""
+            epic_status_class = get_status_class(epic["status"])
+            epic_assignee = epic.get("assignee", "")
+            epic_issue_count = len(epic.get("issues", []))
+            epic_issue_suffix = (
+                f' <span style="color:#6c757d;font-size:12px;">({epic_issue_count} items)</span>'
+                if epic_issue_count else ""
+            )
+
+            html += f"""
+                                <li class="tree-item">
+                                    <div class="tree-node epic" onclick="toggleNode(event, this)">
+                                        <div class="node-header">
+                                            <span class="expand-icon">▶</span>
+                                            <a href="{JIRA_BASE}/browse/{epic['key']}" class="issue-key" target="_blank" onclick="event.stopPropagation()">{epic['key']}</a>
+                                            <span class="summary">{epic['summary']}{epic_issue_suffix}</span>
+                                            <div class="progress-bar">
+                                                <div class="progress-fill {epic_progress_class}" style="width: {epic_completion}%">{epic_completion}%</div>
+                                            </div>
+                                            <span class="status-badge {epic_status_class}">{epic['status']}</span>
+                                            <span class="assignee">{epic_assignee}</span>
+                                        </div>
+                                        <div class="children">
+                                            <ul class="tree">
+"""
+
+            for issue in epic.get("issues", []):
+                issue_status_class = get_status_class(issue["status"])
+                issue_assignee = issue.get("assignee", "")
+                pr_badges_html = ""
+
+                if issue.get("prs"):
+                    pr_badges_html = '<div class="pr-badges">'
+                    for pr in issue["prs"]:
+                        pr_state = pr["state"]
+                        pr_number = pr.get("number", "PR")
+                        pr_badges_html += (
+                            f'<a href="{pr["url"]}" class="pr-badge pr-{pr_state}" '
+                            f'target="_blank" onclick="event.stopPropagation()">#{pr_number} {pr_state}</a>'
+                        )
+                    pr_badges_html += "</div>"
+
+                html += f"""
+                                                <li class="tree-item">
+                                                    <div class="tree-node issue">
+                                                        <div class="node-header">
+                                                            <a href="{JIRA_BASE}/browse/{issue['key']}" class="issue-key" target="_blank">{issue['key']}</a>
+                                                            <span class="summary">{issue['summary']}</span>
+                                                            <span class="status-badge {issue_status_class}">{issue['status']}</span>
+                                                            <span class="assignee">{issue_assignee}</span>
+                                                        </div>
+                                                        {pr_badges_html}
+                                                    </div>
+                                                </li>
+"""
+
+            html += """
+                                            </ul>
+                                        </div>
+                                    </div>
+                                </li>
+"""
+
+        html += """
+                            </ul>
+                        </div>
+                    </div>
+                </li>
+"""
+
+    html += "</ul>\n"
+    return html
+
+
 def generate_html(data: dict[str, Any], label: str, version: str, is_comprehensive: bool = False) -> str:
     """Generate the HTML dashboard."""
 
     stats = data["stats"]
     features = data["features"]
+    contributed_features = data.get("contributed_features", [])
     team_name = data.get("team_name", "")
 
     # Comprehensive view has additional sections
@@ -2168,7 +2515,7 @@ def generate_html(data: dict[str, Any], label: str, version: str, is_comprehensi
         <div class="content">
 """
 
-    if not features:
+    if not features and not contributed_features:
         html += """
             <div class="empty-state">
                 <h2>No features found</h2>
@@ -2176,96 +2523,24 @@ def generate_html(data: dict[str, Any], label: str, version: str, is_comprehensi
             </div>
 """
     else:
-        html += '<ul class="tree">\n'
+        if features:
+            html += render_feature_hierarchy_html(features)
 
-        for feature in features:
-            completion = feature["completion"]
-            progress_class = "low" if completion < 33 else "medium" if completion < 67 else ""
-            status_class = get_status_class(feature["status"])
-
-            assignee = feature.get('assignee', '')
-            html += f"""
-                <li class="tree-item">
-                    <div class="tree-node feature" onclick="toggleNode(event, this)">
-                        <div class="node-header">
-                            <span class="expand-icon">▶</span>
-                            <a href="{JIRA_BASE}/browse/{feature['key']}" class="issue-key" target="_blank" onclick="event.stopPropagation()">{feature['key']}</a>
-                            <span class="summary">{feature['summary']}</span>
-                            <div class="progress-bar">
-                                <div class="progress-fill {progress_class}" style="width: {completion}%">{completion}%</div>
-                            </div>
-                            <span class="status-badge {status_class}">{feature['status']}</span>
-                            <span class="assignee">{assignee}</span>
-                        </div>
-                        <div class="children">
-                            <ul class="tree">
-"""
-
-            for epic in feature.get("epics", []):
-                epic_completion = epic["completion"]
-                epic_progress_class = "low" if epic_completion < 33 else "medium" if epic_completion < 67 else ""
-                epic_status_class = get_status_class(epic["status"])
-                epic_assignee = epic.get('assignee', '')
-
-                html += f"""
-                                <li class="tree-item">
-                                    <div class="tree-node epic" onclick="toggleNode(event, this)">
-                                        <div class="node-header">
-                                            <span class="expand-icon">▶</span>
-                                            <a href="{JIRA_BASE}/browse/{epic['key']}" class="issue-key" target="_blank" onclick="event.stopPropagation()">{epic['key']}</a>
-                                            <span class="summary">{epic['summary']}</span>
-                                            <div class="progress-bar">
-                                                <div class="progress-fill {epic_progress_class}" style="width: {epic_completion}%">{epic_completion}%</div>
-                                            </div>
-                                            <span class="status-badge {epic_status_class}">{epic['status']}</span>
-                                            <span class="assignee">{epic_assignee}</span>
-                                        </div>
-                                        <div class="children">
-                                            <ul class="tree">
-"""
-
-                for issue in epic.get("issues", []):
-                    issue_status_class = get_status_class(issue["status"])
-                    issue_assignee = issue.get('assignee', '')
-                    pr_badges_html = ""
-
-                    if issue.get("prs"):
-                        pr_badges_html = '<div class="pr-badges">'
-                        for pr in issue["prs"]:
-                            pr_state = pr["state"]
-                            pr_number = pr.get("number", "PR")
-                            pr_badges_html += f'<a href="{pr["url"]}" class="pr-badge pr-{pr_state}" target="_blank" onclick="event.stopPropagation()">#{pr_number} {pr_state}</a>'
-                        pr_badges_html += '</div>'
-
-                    html += f"""
-                                                <li class="tree-item">
-                                                    <div class="tree-node issue">
-                                                        <div class="node-header">
-                                                            <a href="{JIRA_BASE}/browse/{issue['key']}" class="issue-key" target="_blank">{issue['key']}</a>
-                                                            <span class="summary">{issue['summary']}</span>
-                                                            <span class="status-badge {issue_status_class}">{issue['status']}</span>
-                                                            <span class="assignee">{issue_assignee}</span>
-                                                        </div>
-                                                        {pr_badges_html}
-                                                    </div>
-                                                </li>
-"""
-
-                html += """
-                                            </ul>
-                                        </div>
-                                    </div>
-                                </li>
-"""
-
-            html += """
-                            </ul>
-                        </div>
-                    </div>
-                </li>
-"""
-
-        html += '</ul>\n'
+        if contributed_features:
+            contributed_epic_count = stats.get("contributed_epics", 0)
+            contributed_issue_count = stats.get("contributed_issues", 0)
+            html += (
+                f'<h2 style="margin-top: 40px; margin-bottom: 20px; color: #495057;">'
+                f"Contributed Work — Epics on Other Teams' Features "
+                f'<span style="font-size: 16px; color: #6c757d;">'
+                f"({len(contributed_features)} features, {contributed_epic_count} epics, "
+                f"{contributed_issue_count} child items)</span></h2>\n"
+            )
+            html += (
+                '<p style="margin-bottom: 15px; color: #6c757d;">'
+                "Features owned by other teams where this team has epics underneath.</p>\n"
+            )
+            html += render_feature_hierarchy_html(contributed_features, show_owner_team=True)
 
     # Independent Epics and Stories sections removed per user request
     # Only showing Features (with hierarchy) and Bugs
@@ -2982,6 +3257,8 @@ def main():
     print(f"\n✅ Dashboard generated successfully!")
     print(f"   File: {output_file}")
     print(f"   Features: {data['stats']['features']}")
+    if data['stats'].get('contributed_epics', 0) > 0:
+        print(f"   Contributed Epics: {data['stats']['contributed_epics']} (on {data['stats']['contributed_features']} other teams' features)")
     print(f"   Epics: {data['stats']['epics']}")
     print(f"   Issues: {data['stats']['issues']}")
     if 'bugs' in data['stats'] and data['stats']['bugs'] > 0:
