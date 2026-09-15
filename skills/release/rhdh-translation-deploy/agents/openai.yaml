@@ -1,0 +1,3 @@
+interface:
+  display_name: "RHDH Translation Deploy"
+  short_description: "Download translations from TMS and deploy to repos"
