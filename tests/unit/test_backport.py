@@ -39,6 +39,78 @@ def _completed_process(stdout="", stderr="", returncode=0):
 
 
 # ---------------------------------------------------------------------------
+# Release version / branch model
+# ---------------------------------------------------------------------------
+
+
+class TestReleaseVersionHelpers:
+    def test_uses_unified_from_2_1(self):
+        assert backport.uses_unified_release_branch("2.1") is True
+        assert backport.uses_unified_release_branch("2.2") is True
+
+    def test_per_plugin_before_2_1(self):
+        assert backport.uses_unified_release_branch("1.10") is False
+        assert backport.uses_unified_release_branch("1.9") is False
+        assert backport.uses_unified_release_branch("2.0") is False
+
+    def test_release_branch_for_unified(self):
+        assert backport.release_branch_for("2.1", "lightspeed") == "release-2.1"
+
+    def test_release_branch_for_per_plugin(self):
+        assert (
+            backport.release_branch_for("1.10", "lightspeed") == "release-1.10/lightspeed"
+        )
+
+    def test_vp_changeset_branch_per_plugin(self):
+        assert (
+            backport.vp_changeset_branch_name(
+                unified_release=False,
+                plugin="orchestrator",
+                release_branch="release-1.10/orchestrator",
+            )
+            == "maintenance-changesets-release/release-1.10/orchestrator"
+        )
+
+    def test_vp_changeset_branch_unified_like_main(self):
+        assert (
+            backport.vp_changeset_branch_name(
+                unified_release=True,
+                plugin="lightspeed",
+                release_branch="release-2.1",
+            )
+            == "changesets-release/lightspeed/release-2.1"
+        )
+
+
+class TestUnifiedReleaseBranchDetection:
+    def test_unified_branch_naming(self):
+        state = backport.BackportState(
+            release="2.1",
+            pr_num=4000,
+            files=["workspaces/lightspeed/plugins/lightspeed/src/index.ts"],
+        )
+        with patch.object(backport, "run_git") as mock_git:
+            mock_git.return_value = _completed_process(stdout="abc123 refs/heads/release-2.1")
+            backport.step2_detect_plugin(state)
+
+        assert state.unified_release is True
+        assert state.release_branch == "release-2.1"
+        assert state.plugin == "lightspeed"
+        assert state.overlays_branch == "release-2.1"
+
+    def test_unified_branch_missing_errors(self):
+        state = backport.BackportState(
+            release="2.1",
+            pr_num=4000,
+            files=["workspaces/lightspeed/plugins/lightspeed/src/index.ts"],
+        )
+        with patch.object(backport, "run_git") as mock_git:
+            mock_git.return_value = _completed_process(stdout="")
+            with pytest.raises(SystemExit):
+                backport.step2_detect_plugin(state)
+
+
+# ---------------------------------------------------------------------------
 # Yarn.lock-only detection in step2
 # ---------------------------------------------------------------------------
 
@@ -151,12 +223,91 @@ class TestStep9YarnLockOnlySkip:
 
 
 # ---------------------------------------------------------------------------
+# Version Packages workflow bootstrap (#4173)
+# ---------------------------------------------------------------------------
+
+
+class TestVpWorkflowSupport:
+    def test_supports_when_all_markers_present(self):
+        content = """
+        branches: ['workspace/**', 'release-*/*']
+        version_branch_id: ${{ steps.extract.outputs.version_branch_id }}
+        versionBranch: maintenance-changesets-release/${{ version_branch_id }}
+        """
+        assert backport.vp_workflow_supports_release_branches(content) is True
+
+    def test_missing_release_branch_trigger(self):
+        content = """
+        branches: ['workspace/**']
+        version_branch_id: foo
+        maintenance-changesets-release/${{ version_branch_id }}
+        """
+        assert backport.vp_workflow_supports_release_branches(content) is False
+
+
+class TestEnsureVpWorkflow:
+    def test_skips_when_yarn_lock_only(self):
+        state = _make_state(yarn_lock_only=True)
+
+        with patch.object(backport, "fetch_release_branch_workflow") as mock_fetch:
+            backport.ensure_vp_workflow(state)
+
+        mock_fetch.assert_not_called()
+        assert state.vp_workflow_bootstrapped is False
+
+    def test_skips_when_unified_release(self):
+        state = _make_state(
+            release="2.1",
+            unified_release=True,
+            release_branch="release-2.1",
+        )
+
+        with patch.object(backport, "fetch_release_branch_workflow") as mock_fetch:
+            backport.ensure_vp_workflow(state)
+
+        mock_fetch.assert_not_called()
+        assert state.vp_workflow_bootstrapped is False
+
+    def test_skips_bootstrap_when_workflow_already_present(self):
+        state = _make_state()
+        workflow = "\n".join(backport.VP_WORKFLOW_MARKERS)
+
+        with (
+            patch.object(backport, "fetch_release_branch_workflow", return_value=workflow),
+            patch.object(backport, "run_git") as mock_git,
+        ):
+            backport.ensure_vp_workflow(state)
+
+        mock_git.assert_not_called()
+        assert state.vp_workflow_bootstrapped is False
+
+    def test_bootstraps_when_workflow_missing(self):
+        state = _make_state()
+
+        with (
+            patch.object(backport, "fetch_release_branch_workflow", return_value="old workflow"),
+            patch.object(backport, "run_git") as mock_git,
+        ):
+            mock_git.side_effect = [
+                _completed_process(),
+                _completed_process(),
+                _completed_process(returncode=0),
+                _completed_process(),
+            ]
+            backport.ensure_vp_workflow(state)
+
+        push_calls = [call for call in mock_git.call_args_list if call[0][0][:2] == ["push", "upstream"]]
+        assert push_calls
+        assert state.vp_workflow_bootstrapped is True
+
+
+# ---------------------------------------------------------------------------
 # Stale maintenance-changesets-release branch cleanup
 # ---------------------------------------------------------------------------
 
 
 class TestCleanupStaleVpBranch:
-    def test_deletes_stale_branch(self):
+    def test_deletes_stale_branch_per_plugin(self):
         state = _make_state()
 
         with (
@@ -172,6 +323,26 @@ class TestCleanupStaleVpBranch:
         api_call = mock_gh.call_args
         assert "DELETE" in api_call[0][0]
         assert "maintenance-changesets-release/release-1.10/orchestrator" in api_call[0][0][-1]
+
+    def test_deletes_stale_branch_unified_per_workspace(self):
+        state = _make_state(
+            release="2.1",
+            plugin="lightspeed",
+            unified_release=True,
+            release_branch="release-2.1",
+        )
+
+        with (
+            patch.object(backport, "run_git") as mock_git,
+            patch.object(backport, "run_gh") as mock_gh,
+        ):
+            mock_git.return_value = _completed_process(
+                stdout="abc123 refs/heads/changesets-release/lightspeed/release-2.1"
+            )
+            backport.cleanup_stale_vp_branch(state)
+
+        api_call = mock_gh.call_args
+        assert "changesets-release/lightspeed/release-2.1" in api_call[0][0][-1]
 
     def test_no_delete_when_branch_missing(self):
         state = _make_state()
@@ -207,6 +378,19 @@ class TestStateSerialization:
 
         loaded = backport.BackportState.load(path)
         assert loaded.yarn_lock_only is False
+
+    def test_unified_release_persists(self, tmp_path):
+        state = _make_state(
+            release="2.1",
+            unified_release=True,
+            release_branch="release-2.1",
+        )
+        path = tmp_path / "state.json"
+        state.save(path)
+
+        loaded = backport.BackportState.load(path)
+        assert loaded.unified_release is True
+        assert loaded.release_branch == "release-2.1"
 
 
 # ---------------------------------------------------------------------------

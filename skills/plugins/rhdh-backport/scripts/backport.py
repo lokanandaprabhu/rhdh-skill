@@ -4,10 +4,13 @@
 Cherry-picks changes to release branches, creates sequential PRs,
 handles Version Packages, updates overlays, and creates changelog PRs.
 
-Uses release-x.y/{plugin} branches directly (no workspace/{plugin} intermediary).
+Branch strategy (by release version):
+  < 2.1  — release-x.y/{plugin} (per-plugin maintenance branches)
+  >= 2.1 — release-x.y (unified release branch, all workspaces)
 
 Usage:
     python scripts/backport.py 1.10 3456
+    python scripts/backport.py 2.1 3456
     python scripts/backport.py 1.10 3456 --mode create
     python scripts/backport.py 1.10 3456 --mode finish
     python scripts/backport.py 1.10 3456 --continue-from /tmp/backport-state-3456.json
@@ -28,6 +31,14 @@ from pathlib import Path
 
 DEFAULT_REPO = "redhat-developer/rhdh-plugins"
 DEFAULT_OVERLAYS_REPO = "redhat-developer/rhdh-plugin-export-overlays"
+
+VP_WORKFLOW_PATH = ".github/workflows/release_workspace_version.yml"
+VP_WORKFLOW_FIX_COMMIT = "ef07585"  # rhdh-plugins #4173
+VP_WORKFLOW_MARKERS = (
+    "release-*/*",
+    "version_branch_id",
+    "maintenance-changesets-release/${{ version_branch_id }}",
+)
 
 EXIT_SUCCESS = 0
 EXIT_FAILURE = 1
@@ -50,6 +61,56 @@ def log_step(n: int, title: str) -> None:
 def die(msg: str, code: int = EXIT_FAILURE) -> None:
     log(f"Error: {msg}")
     sys.exit(code)
+
+
+# ---------------------------------------------------------------------------
+# Release version helpers
+# ---------------------------------------------------------------------------
+
+UNIFIED_RELEASE_CUTOFF = (2, 1)
+
+
+def parse_release_version(release: str) -> tuple[int, int]:
+    parts = release.strip().split(".")
+    if len(parts) < 2:
+        die(f"Invalid release version: {release!r} (expected x.y, e.g. 1.10 or 2.1)")
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        die(f"Invalid release version: {release!r} (expected x.y, e.g. 1.10 or 2.1)")
+    return 0, 0
+
+
+def uses_unified_release_branch(release: str) -> bool:
+    """True for 2.1+ unified release branches (release-x.y)."""
+    return parse_release_version(release) >= UNIFIED_RELEASE_CUTOFF
+
+
+def release_branch_for(release: str, plugin: str) -> str:
+    if uses_unified_release_branch(release):
+        return f"release-{release}"
+    return f"release-{release}/{plugin}"
+
+
+def vp_changeset_branch_name(
+    *,
+    unified_release: bool,
+    plugin: str,
+    release_branch: str,
+) -> str:
+    """Full VP changesets branch name to check or delete before Version Packages.
+
+    Pre-2.1 per-plugin branches use release_workspace_version.yml:
+      maintenance-changesets-release/release-1.10/orchestrator
+
+    Unified 2.1+ branches mirror main's release_workspace.yml (per workspace):
+      changesets-release/lightspeed/release-2.1
+
+    Main itself uses changesets-release/{workspace}/main — same per-workspace pattern.
+    """
+    if unified_release:
+        return f"changesets-release/{plugin}/{release_branch}"
+    return f"maintenance-changesets-release/{release_branch}"
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +265,8 @@ class BackportState:
     vp_version: str = ""
 
     yarn_lock_only: bool = False
+    unified_release: bool = False
+    vp_workflow_bootstrapped: bool = False
 
     overlays_pr_num: int = 0
     changelog_pr_num: int = 0
@@ -391,11 +454,16 @@ def step2_detect_plugin(state: BackportState) -> None:
         )
 
     state.plugin = plugins.pop()
-    state.release_branch = f"release-{state.release}/{state.plugin}"
+    state.unified_release = uses_unified_release_branch(state.release)
+    state.release_branch = release_branch_for(state.release, state.plugin)
     state.backport_branch = f"backport/{state.pr_num}-to-release-{state.release}"
     state.overlays_branch = f"release-{state.release}"
 
     log(f"  Plugin: {state.plugin}")
+    if state.unified_release:
+        log(f"  Release model: unified (>= 2.1)")
+    else:
+        log(f"  Release model: per-plugin (< 2.1)")
     log(f"  Release branch: {state.release_branch}")
 
     result = run_git(
@@ -403,6 +471,12 @@ def step2_detect_plugin(state: BackportState) -> None:
         check=False,
     )
     if not result.stdout.strip():
+        if state.unified_release:
+            die(
+                f"Release branch '{state.release_branch}' does not exist.\n"
+                "Unified release branches (2.1+) are created by the release process — "
+                f"ensure {state.release_branch} exists before backporting."
+            )
         log(
             f"  Release branch '{state.release_branch}' does not exist — creating from latest tag..."
         )
@@ -432,6 +506,85 @@ def step2_detect_plugin(state: BackportState) -> None:
     if workspace_files and all(f.endswith("yarn.lock") for f in workspace_files):
         state.yarn_lock_only = True
         log("  Detected yarn.lock-only change — will skip Version Packages")
+
+
+# ---------------------------------------------------------------------------
+# Version Packages workflow bootstrap (#4173)
+# ---------------------------------------------------------------------------
+
+
+def fetch_release_branch_workflow(release_branch: str) -> str | None:
+    run_git(["fetch", "upstream", release_branch])
+    result = run_git(
+        ["show", f"upstream/{release_branch}:{VP_WORKFLOW_PATH}"],
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def vp_workflow_supports_release_branches(content: str) -> bool:
+    return all(marker in content for marker in VP_WORKFLOW_MARKERS)
+
+
+def ensure_vp_workflow(state: BackportState) -> None:
+    """One-time bootstrap of #4173 workflow changes on per-plugin release branches."""
+    if state.yarn_lock_only:
+        log("  Yarn.lock-only change — skipping VP workflow check")
+        return
+
+    if state.unified_release:
+        log(
+            "  Unified release branch (2.1+) — VP workflow is release-team owned, "
+            "skipping #4173 per-plugin bootstrap"
+        )
+        return
+
+    log("  Checking Version Packages workflow on release branch...")
+    content = fetch_release_branch_workflow(state.release_branch)
+    if content and vp_workflow_supports_release_branches(content):
+        log("  VP workflow supports release-x.y/{plugin} branches (#4173)")
+        return
+
+    log(
+        f"  VP workflow on {state.release_branch} is missing #4173 changes — "
+        "bootstrapping once..."
+    )
+    log(
+        "  Without this fix, merging a changeset will not open Version Packages "
+        "on release-x.y/{plugin} branches."
+    )
+
+    run_git(["fetch", "upstream", "main"])
+    run_git(["checkout", state.release_branch])
+
+    cherry_pick = run_git(
+        ["cherry-pick", VP_WORKFLOW_FIX_COMMIT],
+        check=False,
+    )
+    if cherry_pick.returncode != 0:
+        run_git(["cherry-pick", "--abort"], check=False)
+        run_git(
+            [
+                "checkout",
+                f"upstream/main",
+                "--",
+                VP_WORKFLOW_PATH,
+                "CONTRIBUTING.md",
+            ]
+        )
+        run_git(
+            [
+                "commit",
+                "-m",
+                "chore: sync Version Packages workflow for release-x.y branches (#4173)",
+            ]
+        )
+
+    run_git(["push", "upstream", state.release_branch])
+    state.vp_workflow_bootstrapped = True
+    log(f"  Bootstrapped VP workflow on {state.release_branch}")
 
 
 # ---------------------------------------------------------------------------
@@ -721,8 +874,16 @@ def wait_for_merged(pr_num: int, repo: str, *, timeout: int = 300) -> None:
 
 
 def cleanup_stale_vp_branch(state: BackportState) -> None:
-    version_branch_id = state.release_branch
-    branch_name = f"maintenance-changesets-release/{version_branch_id}"
+    branch_name = vp_changeset_branch_name(
+        unified_release=state.unified_release,
+        plugin=state.plugin,
+        release_branch=state.release_branch,
+    )
+    if state.unified_release:
+        log(
+            f"  Unified release — checking per-workspace VP branch for {state.plugin} "
+            f"(same pattern as main)"
+        )
 
     result = run_git(
         ["ls-remote", "--heads", "upstream", f"refs/heads/{branch_name}"],
@@ -783,7 +944,23 @@ def poll_for_vp_creation(
         log(f"  Waiting for Version Packages PR... ({elapsed}s)")
         time.sleep(interval)
         elapsed += interval
-    die(f"Version Packages PR not created after {timeout}s")
+    troubleshooting = (
+        f"Version Packages PR not created after {timeout}s.\n"
+        f"  Release branch: {release_branch}\n"
+        "  GitHub runs Prior Version Release Workspace using the workflow file on the "
+        "target branch, not main.\n"
+    )
+    if "/" in release_branch.removeprefix("release-"):
+        troubleshooting += (
+            f"  Per-plugin branch (< 2.1): verify {VP_WORKFLOW_PATH} includes #4173 "
+            f"changes (commit {VP_WORKFLOW_FIX_COMMIT}).\n"
+        )
+    else:
+        troubleshooting += (
+            "  Unified branch (2.1+): VP workflow is maintained by the release team — "
+            "check Actions for failures on the release branch workflow.\n"
+        )
+    die(troubleshooting)
     return 0
 
 
@@ -1266,6 +1443,8 @@ def step10_summary(state: BackportState, *, json_output: bool = False) -> None:
             "vp_pr": state.vp_pr_num,
             "vp_commit": state.vp_commit,
             "vp_version": state.vp_version,
+            "unified_release": state.unified_release,
+            "vp_workflow_bootstrapped": state.vp_workflow_bootstrapped,
             "overlays_pr": state.overlays_pr_num,
             "changelog_pr": state.changelog_pr_num,
             "status": "completed",
@@ -1280,6 +1459,10 @@ def step10_summary(state: BackportState, *, json_output: bool = False) -> None:
         log("")
         log(f"Plugin: {state.plugin}")
         log(f"Release: {state.release}")
+        log(
+            f"Branch model: {'unified' if state.unified_release else 'per-plugin'}"
+        )
+        log(f"Release branch: {state.release_branch}")
         log(f"Original PR: #{state.pr_num}")
         log("")
         log("All PRs merged:")
@@ -1409,6 +1592,7 @@ def _run(args, original_branch: str, had_changes: bool) -> int:
     if args.mode in ("auto", "create"):
         step1_fetch_pr(state)
         step2_detect_plugin(state)
+        ensure_vp_workflow(state)
         step3_check_backported(state, force=args.force)
         step4_cherry_pick(state)
         step5_push_to_fork(state)

@@ -4,7 +4,7 @@ description: >
   Automate the RHDH plugin backport process from PR cherry-pick to changelog.
   Handles: cherry-pick with AI conflict resolution, PR creation,
   CI monitoring, auto-merge, Version Packages detection, and overlays update.
-  Uses release-x.y/{plugin} branches directly (no workspace/{plugin} intermediary).
+  Pre-2.1: release-x.y/{plugin} per-plugin branches. 2.1+: unified release-x.y branch.
   Accepts a release version and PR number/URL. Auto-detects plugin from PR files.
   Modes: auto (full workflow), create (PR only, stops for review), finish (after manual merge).
   Use when you need to backport changes to a release branch (e.g., "backport PR #3456 to 1.10").
@@ -67,6 +67,7 @@ See `references/ai-conflict-resolution.md` for detailed resolution strategies.
 ```bash
 # Full automation (default)
 /backport 1.10 3456
+/backport 2.1 3456
 /backport 1.9 https://github.com/redhat-developer/rhdh-plugins/pull/2345
 
 # Create PR only, stop for manual review
@@ -82,7 +83,7 @@ See `references/ai-conflict-resolution.md` for detailed resolution strategies.
 
 ### auto (default) — Full workflow
 
-Runs all 10 steps end-to-end. Zero intervention required.
+Runs all 11 steps end-to-end. Zero intervention required.
 
 ```bash
 python scripts/backport.py <release> <pr_source> --mode auto
@@ -90,7 +91,7 @@ python scripts/backport.py <release> <pr_source> --mode auto
 
 ### create — PR only, stops for review
 
-Runs steps 1-6: cherry-pick, push, create PR. Stops and prints the PR URL.
+Runs steps 1-7: workflow bootstrap, cherry-pick, push, create PR. Stops and prints the PR URL.
 You review and merge manually, then run with `--mode finish`.
 
 ```bash
@@ -99,12 +100,42 @@ python scripts/backport.py <release> <pr_source> --mode create
 
 ### finish — After manual merge
 
-Runs steps 7-10: Version Packages, overlays update, changelog.
+Runs steps 8-11: Version Packages, overlays update, changelog.
 Assumes PR #1 from `--mode create` is already merged.
 
 ```bash
 python scripts/backport.py <release> <pr_source> --mode finish
 ```
+
+---
+
+## Branch strategies
+
+The skill picks the branch model from the release version. **2.1 is the cutoff.**
+
+### Unified release branch — 2.1+ (e.g. `release-2.1`)
+
+- One branch per release, all workspaces (similar to `main`).
+- Open patch PRs targeting `release-2.1` directly.
+- Version Packages, overlays, and changelog steps are the same as pre-2.1.
+- VP workflow on the unified branch is maintained by the release team (no #4173 bootstrap).
+- The `release-2.1` branch must already exist — the skill does not auto-create it.
+
+### Per-plugin release branch — before 2.1 (e.g. `release-1.10/lightspeed`)
+
+- One branch per plugin per release; supports concurrent backports.
+- Open patch PRs targeting `release-x.y/{plugin}` directly.
+- Version Packages PR comes from `maintenance-changesets-release/release-x.y/{plugin}`.
+- npm publish uses dist-tag `maintenance`.
+- Auto-creates the release branch from the latest plugin tag if missing.
+- One-time #4173 VP workflow bootstrap per release branch (see below).
+
+### Legacy: `workspace/{plugin}` (e.g. `workspace/lightspeed`)
+
+- Old flow; still works with `workspace/**` workflow trigger only.
+- Version Packages PR comes from `maintenance-changesets-release/{workspace}`.
+- Avoid when concurrent backports to multiple releases are needed.
+- Not automated by this skill.
 
 ---
 
@@ -114,17 +145,21 @@ python scripts/backport.py <release> <pr_source> --mode finish
 
 1. Parse arguments and fetch PR details
 2. Auto-detect plugin from PR files (also detects yarn.lock-only changes)
-3. Check if already backported
-4. Cherry-pick commit(s)
-5. Push backport branch to fork
-6. Create PR #1 (fork → release branch), monitor CI, merge
+3. **One-time VP workflow bootstrap** (pre-2.1 only) — verify
+   `release_workspace_version.yml` on the release branch includes
+   [#4173](https://github.com/redhat-developer/rhdh-plugins/pull/4173) changes;
+   cherry-pick once if missing (skipped for yarn.lock-only and 2.1+ unified branches)
+4. Check if already backported
+5. Cherry-pick commit(s)
+6. Push backport branch to fork
+7. Create PR #1 (fork → release branch), monitor CI, merge
 
-### Steps 7-10 (finish)
+### Steps 8-11 (finish)
 
-7. Detect and merge Version Packages PR (skipped for yarn.lock-only; cleans up stale `maintenance-changesets-release` branch)
-8. Trigger overlays update workflow, /publish, wait for CI, merge
-9. Create and merge changelog PR to main (skipped for yarn.lock-only)
-10. Print summary
+8. Detect and merge Version Packages PR (skipped for yarn.lock-only; cleans up stale per-workspace changesets branch)
+9. Trigger overlays update workflow, /publish, wait for CI, merge
+10. Create and merge changelog PR to main (skipped for yarn.lock-only)
+11. Print summary
 
 ### Conflict handling (exit code 2)
 
@@ -154,16 +189,53 @@ Print instructions and stop.
 
 ## Special Cases
 
+### One-time workflow bootstrap per release branch (pre-2.1 only)
+
+Before the first backport to a `release-x.y/{plugin}` branch (< 2.1) that expects an
+npm release via changesets, the release branch must carry the updated
+`.github/workflows/release_workspace_version.yml` from
+[#4173](https://github.com/redhat-developer/rhdh-plugins/pull/4173) (commit `ef07585`).
+
+**Why:** GitHub runs Prior Version Release Workspace using the workflow file **on the
+target branch**, not on `main`. Release branches created before #4173 only trigger on
+`workspace/**`, not `release-*/*`. Merging a backport with a changeset will **not**
+open Version Packages without this fix.
+
+The script checks automatically in `--mode auto` and `--mode create`. If the workflow
+is missing the #4173 markers, it cherry-picks `ef07585` once (or syncs the workflow
+file from `main`) and pushes to the release branch. **Do not repeat for every
+backport** — only once per release branch.
+
+Required markers in `release_workspace_version.yml`:
+
+- `branches: ['workspace/**', 'release-*/*']`
+- `version_branch_id` output for `release-*/*` base refs
+- `versionBranch: maintenance-changesets-release/${{ version_branch_id }}`
+- Stale-branch check uses `maintenance-changesets-release/release-x.y/{plugin}` (full base ref)
+
+See `references/workflow-bootstrap.md` for manual bootstrap commands.
+
+**2.1+ unified branches** (`release-2.1`, etc.) do not use this bootstrap — the
+Version Packages workflow on those branches is owned by the release team and may
+change as that work lands.
+
 ### Yarn.lock-only changes (CVE fixes)
 
 When the PR only changes `yarn.lock` files (e.g., CVE dependency fix with no code changes),
 the script automatically skips Version Packages (step 7) and changelog (step 9).
 No npm release is needed — the overlays update (step 8) uses the merge commit directly as `repo-ref`.
 
-### Stale maintenance-changesets-release branch
+### Stale Version Packages changesets branch
 
-The Version Packages workflow fails if a stale `maintenance-changesets-release/{release-branch}` branch
-exists from a previous cycle. The script automatically detects and deletes stale branches before step 7.
+The Version Packages workflow fails if a stale changesets branch exists from a
+previous cycle. The script deletes it per workspace before waiting for Version Packages:
+
+| Release model | Stale branch cleaned |
+|---------------|---------------------|
+| Pre-2.1 per-plugin | `maintenance-changesets-release/release-x.y/{plugin}` |
+| 2.1+ unified | `changesets-release/{plugin}/release-x.y` (per workspace, like `main`) |
+
+On `main`, the equivalent path is `changesets-release/{plugin}/main`.
 
 ---
 
@@ -172,8 +244,8 @@ exists from a previous cycle. The script automatically detects and deletes stale
 | Flag | Description |
 |------|-------------|
 | `--mode auto` | Full workflow (default) |
-| `--mode create` | Steps 1-6 only, creates PR #1 and stops |
-| `--mode finish` | Steps 7-10, handles Version Packages, overlays, and changelog (after PR #1 merge) |
+| `--mode create` | Steps 1-7 only, creates PR #1 and stops |
+| `--mode finish` | Steps 8-11, handles Version Packages, overlays, and changelog (after PR #1 merge) |
 | `--continue-from FILE` | Resume after conflict resolution |
 | `--force` | Skip already-backported check |
 | `--json` | Structured JSON output to stdout |
@@ -205,6 +277,7 @@ exists from a previous cycle. The script automatically detects and deletes stale
 | `references/overlays-update.md` | Overlays update + /publish flow |
 | `references/ci-monitoring.md` | CI monitoring and merge logic |
 | `references/version-packages-detection.md` | Version Packages PR detection |
+| `references/workflow-bootstrap.md` | One-time #4173 workflow bootstrap per release branch |
 | `references/pr-creation.md` | PR templates and patterns |
 
 </reference_index>

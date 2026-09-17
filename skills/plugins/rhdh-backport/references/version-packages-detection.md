@@ -5,10 +5,14 @@ How to detect and validate the auto-generated Version Packages PR.
 ## What is Version Packages?
 
 Version Packages is a GitHub workflow (changesets bot) that:
-- Automatically runs after changes merge to `workspace/*` branches
+- Automatically runs after changes merge to `release-x.y/{plugin}` branches (recommended)
+  or legacy `workspace/{plugin}` branches
 - Updates version numbers in package.json files
 - Generates CHANGELOG.md entries
-- Publishes packages to npm after merge
+- Publishes packages to npm with dist-tag `maintenance` after merge
+
+**Prerequisite:** The target `release-x.y/{plugin}` branch must include the #4173
+workflow changes. See `workflow-bootstrap.md`.
 
 **PR Title Format:**
 ```
@@ -17,9 +21,9 @@ Version Packages (lightspeed)
 Version Packages (topology)
 ```
 
-## Two Scenarios After PR #2 Merges
+## Two Scenarios After Backport PR Merges
 
-When PR #2 (release → workspace) merges, the changesets bot does one of:
+When the backport PR (fork → `release-x.y/{plugin}`) merges, the changesets bot does one of:
 
 ### Scenario A: No existing Version Packages PR
 The bot **creates a new PR**. The skill must wait for it to appear.
@@ -35,16 +39,17 @@ The bot **updates the existing PR** by adding the new changeset/changelog entry 
 ```bash
 detect_version_packages_pr() {
   local PLUGIN=$1
-  local WORKSPACE_BRANCH="workspace/${PLUGIN}"
+  local RELEASE=$2
+  local RELEASE_BRANCH="release-${RELEASE}/${PLUGIN}"
   local MAX_WAIT=300  # 5 minutes
   local ELAPSED=0
 
-  echo "🔍 Detecting Version Packages PR for $PLUGIN..."
+  echo "🔍 Detecting Version Packages PR for $PLUGIN on $RELEASE_BRANCH..."
 
   # First, check if a VP PR already exists (Scenario B)
   VP_PR_NUM=$(gh pr list \
     --repo redhat-developer/rhdh-plugins \
-    --base "$WORKSPACE_BRANCH" \
+    --base "$RELEASE_BRANCH" \
     --search "Version Packages (${PLUGIN}) in:title" \
     --state open \
     --json number,updatedAt \
@@ -86,7 +91,7 @@ detect_version_packages_pr() {
   while [ -z "$VP_PR_NUM" ] && [ $ELAPSED -lt $MAX_WAIT ]; do
     VP_PR_NUM=$(gh pr list \
       --repo redhat-developer/rhdh-plugins \
-      --base "$WORKSPACE_BRANCH" \
+      --base "$RELEASE_BRANCH" \
       --search "Version Packages (${PLUGIN}) in:title" \
       --state open \
       --json number \
@@ -106,8 +111,9 @@ detect_version_packages_pr() {
     echo "  1. Check if workflow triggered:"
     echo "     https://github.com/redhat-developer/rhdh-plugins/actions"
     echo ""
-    echo "  2. Check if PR already exists:"
-    echo "     gh pr list --base $WORKSPACE_BRANCH --state all"
+    echo "  2. Check if #4173 workflow is on the release branch (see workflow-bootstrap.md)"
+    echo "  3. Check if PR already exists:"
+    echo "     gh pr list --base $RELEASE_BRANCH --state all"
     echo ""
     echo "  3. Check workflow logs for errors"
     return 1
@@ -127,7 +133,7 @@ After detection, validate the PR:
 validate_version_packages_pr() {
   local VP_PR_NUM=$1
   local PLUGIN=$2
-  local WORKSPACE_BRANCH="workspace/${PLUGIN}"
+  local RELEASE_BRANCH=$3
   
   echo "🔍 Validating Version Packages PR #$VP_PR_NUM..."
   
@@ -149,9 +155,9 @@ validate_version_packages_pr() {
   fi
   
   # Validate base branch
-  if [ "$VP_BASE" != "$WORKSPACE_BRANCH" ]; then
+  if [ "$VP_BASE" != "$RELEASE_BRANCH" ]; then
     echo "❌ Error: Version Packages PR has wrong base branch"
-    echo "   Expected: $WORKSPACE_BRANCH"
+    echo "   Expected: $RELEASE_BRANCH"
     echo "   Got: $VP_BASE"
     return 1
   fi
@@ -179,7 +185,8 @@ validate_version_packages_pr() {
 ## Why Detection Can Fail
 
 **1. Workflow didn't trigger:**
-- PR #2 was created from fork (not upstream)
+- Release branch missing #4173 workflow changes (see `workflow-bootstrap.md`)
+- Backport PR was created from fork (not upstream) — usually fine; workflow uses target branch file
 - Workflow permissions issue
 - GitHub Actions disabled
 
@@ -205,7 +212,7 @@ validate_version_packages_pr() {
 # Check for existing VP PR (any state)
 EXISTING_VP=$(gh pr list \
   --repo redhat-developer/rhdh-plugins \
-  --base "$WORKSPACE_BRANCH" \
+  --base "$RELEASE_BRANCH" \
   --search "Version Packages (${PLUGIN}) in:title" \
   --state all \
   --json number,state \
@@ -235,15 +242,15 @@ echo "  1. Changeset not included in backport"
 echo "  2. Changes only in non-published paths (dev/, tests/)"
 echo "  3. Package version already correct"
 echo ""
-echo "Check workspace branch manually:"
-echo "  git log workspace/$PLUGIN"
+echo "Check release branch manually:"
+echo "  git log upstream/release-x.y/$PLUGIN"
 echo ""
 read -p "Skip Version Packages step? [y/N]: " SKIP
 
 if [[ "$SKIP" =~ ^[Yy]$ ]]; then
   # Continue without VP
   VP_PR_NUM=""
-  VP_COMMIT=$(git rev-parse upstream/workspace/$PLUGIN)
+  VP_COMMIT=$(git rev-parse upstream/release-x.y/$PLUGIN)
   return 0
 fi
 ```
@@ -292,7 +299,7 @@ watch_for_vp_pr() {
     # Check if PR exists
     VP_PR_NUM=$(gh pr list \
       --repo redhat-developer/rhdh-plugins \
-      --base "workspace/${PLUGIN}" \
+      --base "release-x.y/${PLUGIN}" \
       --search "Version Packages (${PLUGIN}) in:title" \
       --state open \
       --json number \
@@ -328,7 +335,7 @@ If multiple VP PRs exist:
 # Get all open VP PRs
 VP_PRS=$(gh pr list \
   --repo redhat-developer/rhdh-plugins \
-  --base "workspace/${PLUGIN}" \
+  --base "release-x.y/${PLUGIN}" \
   --search "Version Packages in:title" \
   --state open \
   --json number,title,createdAt)
