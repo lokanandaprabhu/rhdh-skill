@@ -461,9 +461,9 @@ def step2_detect_plugin(state: BackportState) -> None:
 
     log(f"  Plugin: {state.plugin}")
     if state.unified_release:
-        log(f"  Release model: unified (>= 2.1)")
+        log("  Release model: unified (>= 2.1)")
     else:
-        log(f"  Release model: per-plugin (< 2.1)")
+        log("  Release model: per-plugin (< 2.1)")
     log(f"  Release branch: {state.release_branch}")
 
     result = run_git(
@@ -547,10 +547,7 @@ def ensure_vp_workflow(state: BackportState) -> None:
         log("  VP workflow supports release-x.y/{plugin} branches (#4173)")
         return
 
-    log(
-        f"  VP workflow on {state.release_branch} is missing #4173 changes — "
-        "bootstrapping once..."
-    )
+    log(f"  VP workflow on {state.release_branch} is missing #4173 changes — bootstrapping once...")
     log(
         "  Without this fix, merging a changeset will not open Version Packages "
         "on release-x.y/{plugin} branches."
@@ -568,7 +565,7 @@ def ensure_vp_workflow(state: BackportState) -> None:
         run_git(
             [
                 "checkout",
-                f"upstream/main",
+                "upstream/main",
                 "--",
                 VP_WORKFLOW_PATH,
                 "CONTRIBUTING.md",
@@ -1459,9 +1456,7 @@ def step10_summary(state: BackportState, *, json_output: bool = False) -> None:
         log("")
         log(f"Plugin: {state.plugin}")
         log(f"Release: {state.release}")
-        log(
-            f"Branch model: {'unified' if state.unified_release else 'per-plugin'}"
-        )
+        log(f"Branch model: {'unified' if state.unified_release else 'per-plugin'}")
         log(f"Release branch: {state.release_branch}")
         log(f"Original PR: #{state.pr_num}")
         log("")

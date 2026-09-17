@@ -57,9 +57,7 @@ class TestReleaseVersionHelpers:
         assert backport.release_branch_for("2.1", "lightspeed") == "release-2.1"
 
     def test_release_branch_for_per_plugin(self):
-        assert (
-            backport.release_branch_for("1.10", "lightspeed") == "release-1.10/lightspeed"
-        )
+        assert backport.release_branch_for("1.10", "lightspeed") == "release-1.10/lightspeed"
 
     def test_vp_changeset_branch_per_plugin(self):
         assert (
@@ -296,7 +294,9 @@ class TestEnsureVpWorkflow:
             ]
             backport.ensure_vp_workflow(state)
 
-        push_calls = [call for call in mock_git.call_args_list if call[0][0][:2] == ["push", "upstream"]]
+        push_calls = [
+            call for call in mock_git.call_args_list if call[0][0][:2] == ["push", "upstream"]
+        ]
         assert push_calls
         assert state.vp_workflow_bootstrapped is True
 
