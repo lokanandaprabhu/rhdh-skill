@@ -100,16 +100,17 @@ def vp_changeset_branch_name(
 ) -> str:
     """Full VP changesets branch name to check or delete before Version Packages.
 
-    Pre-2.1 per-plugin branches use release_workspace_version.yml:
+    Pre-2.1 per-plugin branches (release_workspace_version.yml / #4173):
       maintenance-changesets-release/release-1.10/orchestrator
 
-    Unified 2.1+ branches mirror main's release_workspace.yml (per workspace):
-      changesets-release/lightspeed/release-2.1
+    Unified 2.1+ repository-wide branches (rhdh-plugins #4854), per workspace:
+      maintenance-changesets-release/release-2.1/lightspeed
 
-    Main itself uses changesets-release/{workspace}/main — same per-workspace pattern.
+    Main's release_workspace.yml uses a different prefix
+    (changesets-release/{workspace}/main) and is not used for prior-version backports.
     """
     if unified_release:
-        return f"changesets-release/{plugin}/{release_branch}"
+        return f"maintenance-changesets-release/{release_branch}/{plugin}"
     return f"maintenance-changesets-release/{release_branch}"
 
 

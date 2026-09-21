@@ -118,8 +118,12 @@ The skill picks the branch model from the release version. **2.1 is the cutoff.*
 - One branch per release, all workspaces (similar to `main`).
 - Open patch PRs targeting `release-2.1` directly.
 - Version Packages, overlays, and changelog steps are the same as pre-2.1.
-- VP workflow on the unified branch is maintained by the release team (no #4173 bootstrap).
-- The `release-2.1` branch must already exist — the skill does not auto-create it.
+- Version Packages PR comes from `maintenance-changesets-release/release-x.y/{plugin}`
+  (per workspace; rhdh-plugins [#4854](https://github.com/redhat-developer/rhdh-plugins/pull/4854)).
+- VP workflow on the unified branch is release-team owned (no #4173 bootstrap).
+- The `release-2.1` branch must already exist and must be cut from `main` **after**
+  [#4854](https://github.com/redhat-developer/rhdh-plugins/pull/4854) merges — the skill
+  does not auto-create it.
 
 ### Per-plugin release branch — before 2.1 (e.g. `release-1.10/lightspeed`)
 
@@ -130,11 +134,11 @@ The skill picks the branch model from the release version. **2.1 is the cutoff.*
 - Auto-creates the release branch from the latest plugin tag if missing.
 - One-time #4173 VP workflow bootstrap per release branch (see below).
 
-### Legacy: `workspace/{plugin}` (e.g. `workspace/lightspeed`)
+### Unsupported: `workspace/{plugin}`
 
-- Old flow; still works with `workspace/**` workflow trigger only.
-- Version Packages PR comes from `maintenance-changesets-release/{workspace}`.
-- Avoid when concurrent backports to multiple releases are needed.
+- Removed from the prior-release workflow trigger in
+  [#4854](https://github.com/redhat-developer/rhdh-plugins/pull/4854).
+- Do not use for 1.9 / 1.10 / 2.1+ backports. Use `release-1.x/{plugin}` or `release-x.y`.
 - Not automated by this skill.
 
 ---
@@ -233,9 +237,11 @@ previous cycle. The script deletes it per workspace before waiting for Version P
 | Release model | Stale branch cleaned |
 |---------------|---------------------|
 | Pre-2.1 per-plugin | `maintenance-changesets-release/release-x.y/{plugin}` |
-| 2.1+ unified | `changesets-release/{plugin}/release-x.y` (per workspace, like `main`) |
+| 2.1+ unified | `maintenance-changesets-release/release-x.y/{plugin}` (per workspace) |
 
-On `main`, the equivalent path is `changesets-release/{plugin}/main`.
+Both prior-version models use the `maintenance-changesets-release/` prefix.
+`main` publishes via a different workflow (`changesets-release/{plugin}/main`) and
+is not used for backports.
 
 ---
 

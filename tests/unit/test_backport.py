@@ -69,14 +69,14 @@ class TestReleaseVersionHelpers:
             == "maintenance-changesets-release/release-1.10/orchestrator"
         )
 
-    def test_vp_changeset_branch_unified_like_main(self):
+    def test_vp_changeset_branch_unified_per_workspace(self):
         assert (
             backport.vp_changeset_branch_name(
                 unified_release=True,
                 plugin="lightspeed",
                 release_branch="release-2.1",
             )
-            == "changesets-release/lightspeed/release-2.1"
+            == "maintenance-changesets-release/release-2.1/lightspeed"
         )
 
 
@@ -337,12 +337,12 @@ class TestCleanupStaleVpBranch:
             patch.object(backport, "run_gh") as mock_gh,
         ):
             mock_git.return_value = _completed_process(
-                stdout="abc123 refs/heads/changesets-release/lightspeed/release-2.1"
+                stdout=("abc123 refs/heads/maintenance-changesets-release/release-2.1/lightspeed")
             )
             backport.cleanup_stale_vp_branch(state)
 
         api_call = mock_gh.call_args
-        assert "changesets-release/lightspeed/release-2.1" in api_call[0][0][-1]
+        assert "maintenance-changesets-release/release-2.1/lightspeed" in api_call[0][0][-1]
 
     def test_no_delete_when_branch_missing(self):
         state = _make_state()

@@ -39,6 +39,8 @@ VP, overlays, and changelog run for both models. Only the target branch shape di
 
 - **Pre-2.1:** `release-x.y/{plugin}` branches — supports concurrent backports
 - **2.1+:** unified `release-x.y` branch — all workspaces on one branch
+  (`maintenance-changesets-release/release-x.y/{plugin}` for Version Packages)
+- `workspace/{plugin}` is unsupported (removed in rhdh-plugins #4854)
 - One-time #4173 workflow bootstrap per per-plugin release branch (pre-2.1 only)
 - Auto-creates per-plugin release branch from latest tag if missing (< 2.1)
 - AI conflict resolution for cherry-pick failures

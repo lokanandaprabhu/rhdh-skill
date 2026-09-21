@@ -28,9 +28,9 @@ Learned from the lightspeed `release-1.10` backport (PRs
 |----------|-------------------|
 | First backport to `release-x.y/{plugin}` (< 2.1) with a changeset | Yes, once per release branch |
 | Subsequent backports to same `release-x.y/{plugin}` | No — already bootstrapped |
-| Backport to unified `release-2.1+` branch | No — release-team workflow |
+| Backport to unified `release-2.1+` branch | No — cut `release-2.1` from main after #4854 |
 | Yarn.lock-only CVE fix (no npm release) | No — Version Packages is skipped |
-| Legacy `workspace/{plugin}` flow | No — old trigger still works |
+| `workspace/{plugin}` flow | Unsupported — removed in #4854 |
 
 ## Required workflow markers
 
@@ -46,17 +46,17 @@ Plus logic for:
 - `versionBranch: maintenance-changesets-release/${{ version_branch_id }}`
 - Stale-branch check against `maintenance-changesets-release/release-x.y/{plugin}` (full base ref, not plugin name alone)
 
-Version Packages PR branch naming for release branches:
+Version Packages PR branch naming:
 
 ```
+# Pre-2.1 per-plugin
 maintenance-changesets-release/release-1.10/lightspeed
+
+# 2.1+ unified (still per workspace; #4854)
+maintenance-changesets-release/release-2.1/lightspeed
 ```
 
-Legacy `workspace/{plugin}` branches keep:
-
-```
-maintenance-changesets-release/lightspeed
-```
+`workspace/{plugin}` is unsupported after [#4854](https://github.com/redhat-developer/rhdh-plugins/pull/4854).
 
 ## Automatic bootstrap (script)
 
@@ -104,8 +104,7 @@ If both patterns appear, the branch is ready for changeset backports.
 | Release model | Branch cleaned before VP |
 |---------------|--------------------------|
 | Pre-2.1 per-plugin | `maintenance-changesets-release/release-x.y/{plugin}` |
-| 2.1+ unified | `changesets-release/{plugin}/release-x.y` (per workspace) |
-| `main` | `changesets-release/{plugin}/main` |
+| 2.1+ unified | `maintenance-changesets-release/release-x.y/{plugin}` |
 
-Unified release branches follow the same per-workspace pattern as `main`, not a
-single branch-wide `maintenance-changesets-release/release-2.1` path.
+Both use the maintenance prefix and a per-workspace suffix. Not
+`changesets-release/{plugin}/release-x.y` (that pattern is for `main` only).
