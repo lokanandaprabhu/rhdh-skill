@@ -1,22 +1,19 @@
 # Workflow: Download translations and deploy to repos
 
-Download completed translations from TMS, validate them, deploy into each
-repo's TypeScript locale files, and prepare branches for PR creation.
+Download completed translations from TMS, merge into translated SOT and
+locale `.ts` files, then prepare PRs.
 
 <prerequisites>
 
-All four repos (rhdh-plugins, rhdh, community-plugins, backstage) must be
-cloned as siblings. The translations-cli must be built. TMS credentials must
-be available (environment variables or `~/.i18n.auth.json`). The `gh` CLI
-must be authenticated for PR creation.
-
-Run the preflight check first:
+Sibling clones of rhdh-plugins, rhdh, community-plugins, and backstage.
+translations-cli must be built. TMS credentials available. `gh` authenticated
+for PRs. Target repos should have Prettier installed (`node_modules/.bin/prettier`).
 
 ```bash
 uv run scripts/translation_deploy.py --json preflight
 ```
 
-Follow `next_steps` to resolve any failures before continuing.
+Follow `next_steps` before continuing.
 
 </prerequisites>
 
@@ -25,9 +22,9 @@ Follow `next_steps` to resolve any failures before continuing.
 ## Step 1: Confirm readiness
 
 Ask the user:
-- The TMS project ID (or confirm it is in `.i18n.config.json`)
-- Which languages to download (default: de, es, fr, it, ja)
-- The sprint identifier (for branch naming)
+- TMS project ID (or confirm `.i18n.config.json`)
+- Languages to download (default: de, es, fr, it, ja)
+- Sprint identifier (branch / changeset naming)
 
 ## Step 2: Download from TMS
 
@@ -37,8 +34,9 @@ uv run scripts/translation_deploy.py --json download \
   --output-dir i18n/downloads
 ```
 
-Check the output — confirm files were downloaded for the expected repos and
-languages. If any repo has zero files, warn the user.
+Confirm files for the expected repos and languages. If the CLI returns only
+the first page of jobs, list job IDs with `memsource job list` and download
+by job id.
 
 ## Step 3: Validate downloads
 
@@ -47,59 +45,67 @@ uv run scripts/translation_deploy.py --json validate \
   --source-dir i18n/downloads
 ```
 
-Check for:
-- Invalid JSON structure
-- Empty plugins or missing keys
-- Placeholder preservation ({{...}} patterns)
+Stop if JSON structure checks fail.
 
-If validation fails, stop and report issues to the user.
+## Step 4: Update translated SOT (rhdh/translations/)
 
-## Step 4: Deploy translations
+Merges backstage, community-plugins, and rhdh downloads into
+`rhdh/translations/{repo}-{locale}.json`. Fixes the TMS `en` language key to
+the real locale. Does **not** write rhdh-plugins into this directory.
+
+```bash
+uv run scripts/translation_deploy.py --json update-translated-sot \
+  --source-dir i18n/downloads \
+  --sprint {{SPRINT}}
+```
+
+This opens a PR on **rhdh**. There is **no** PR on the upstream backstage
+repo — RHDH overrides Backstage strings from these locale JSON files.
+
+## Step 5: Deploy `.ts` merges (rhdh-plugins + community-plugins only)
 
 ```bash
 uv run scripts/translation_deploy.py --json deploy \
   --source-dir i18n/downloads
 ```
 
-This runs `translations-cli i18n deploy` in each repo, which:
-- Parses downloaded JSON files
-- Generates TypeScript locale files (e.g., `it.ts`, `ja.ts`)
-- Validates keys against reference files (`ref.ts`)
-- Reports any missing or excess keys
+For each plugin locale file:
 
-Present the deploy summary per repo.
+- Update values for keys that already exist
+- Skip keys that are not in the file
+- Never remove keys or change imports/exports
+- Format apostrophe strings with double quotes
+- Run Prettier on changed files
 
-## Step 5: Prepare PRs
+Do **not** run `translations-cli i18n deploy`.
+
+## Step 6: Changesets and PRs
 
 ```bash
-uv run scripts/translation_deploy.py --json pr \
-  --sprint {{SPRINT}}
+uv run scripts/translation_deploy.py --json pr --sprint {{SPRINT}}
 ```
 
-For each repo with changes, use `/mutation-gate` to:
+Writes changesets under each touched workspace `.changeset/` using the real
+`package.json` `name` (never `UNKNOWN`).
 
-1. Create a branch: `translation/s{{SPRINT}}`
-2. Stage changed files: `git add -A`
-3. Commit with message:
-   ```
-   chore(i18n): update translations for sprint {{SPRINT}}
+Then use `/mutation-gate` per repo with changes:
 
-   Signed-off-by: {{USER_NAME}} <{{USER_EMAIL}}>
-   ```
-4. Push the branch
-5. Create a PR via `gh pr create`
+1. Branch: `translation/{{SPRINT}}`
+2. Stage translation files + changesets (not local `i18n/` downloads)
+3. Commit with Signed-off-by
+4. Push and `gh pr create`
 
-For repos that use changesets (rhdh-plugins, community-plugins), add a
-changeset file before committing.
+Repos: **rhdh-plugins** and **community-plugins** only for `.ts` PRs.
 
 </process>
 
 <completion>
 
 Report:
-1. Per-repo deploy summary (files deployed, key counts)
-2. Validation results (missing/excess keys per repo)
-3. PR URLs for each repo (or note if no changes)
-4. Any warnings about placeholder or key coverage issues
+1. Translated SOT PR URL (rhdh)
+2. Per-repo `.ts` deploy summary (updated / skipped / unchanged)
+3. Changeset paths and package names
+4. PR URLs for rhdh-plugins and community-plugins
+5. Explicit note: no backstage upstream PR
 
 </completion>
