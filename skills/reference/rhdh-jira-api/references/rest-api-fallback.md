@@ -15,6 +15,11 @@ payload semantics; it never owns credentials or raw HTTP authentication.
 Do not create token files, shell `AUTH` variables, Authorization headers, or credential-bearing
 request previews. Do not fall back from a native tool to raw `curl`.
 
+**Exception — version CRUD:** `acli` has no `version` subcommand. Bundled CLIs
+that manage project versions (e.g. `rhdh-release-fixversions`) use the invoker's
+Jira API token via their own authenticated client. Credentials stay in the
+environment or token file and never appear in the conversation or plan output.
+
 ## Supported semantic operations
 
 | Operation | Request semantics | Expected result |
@@ -25,6 +30,11 @@ request previews. Do not fall back from a native tool to raw `curl`.
 | Update fields | Partial issue update with a `fields` object | No-content success or updated issue |
 | Add comment | Add an ADF comment, with visibility when required | Comment receipt |
 | Add remote link | Attach a web link to an issue key with `{"object": {"url": ..., "title": ...}}` | Created link with an id, or the id of the link it replaced |
+| List project versions | `GET /rest/api/3/project/{key}/versions` | Array of version objects with name, dates, released, archived |
+| Create project version | `POST /rest/api/3/version` with `{name, project, startDate?, releaseDate?, released?, archived?}` | Created version object |
+| Update project version | `PUT /rest/api/3/version/{id}` with changed fields | Updated version object |
+| Delete project version | `DELETE /rest/api/3/version/{id}` with optional `moveFixIssuesTo` query param | No content |
+| Approximate issue count | `POST /rest/api/3/search/approximate-count` with `{jql}` | `{count}` — use before deleting a version that may have issues |
 
 The host adapter may expose these as tools instead of URL paths. Select by semantic capability, not
 by tool name, and keep transport-specific response metadata out of what you report.

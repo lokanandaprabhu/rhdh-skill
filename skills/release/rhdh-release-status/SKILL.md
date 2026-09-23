@@ -41,10 +41,14 @@ restating the setup.
 
 - Milestone dates — Feature Freeze, Code Freeze, GA — are `/rhdh-release-schedule`.
 - A Slack freeze announcement is `/rhdh-release-announce`.
+- The SoS check-in report for team leads is `/rhdh-release-sos`.
 - The team roster, leads, and Cloud IDs are `/rhdh-release-teams`. This skill
   counts issues per team; it does not publish the roster.
 - Reading a single issue, a board, or a sprint is `/rhdh-jira-api`. Any Jira
   write is `/rhdh-jira-update`.
+- Creating, aligning, or deleting **project** fix versions across RHIDP,
+  RHDHPLAN, and RHDHBUGS is `/rhdh-release-fixversions`. This skill only
+  queries issues by fix version.
 
 ## Completion
 
